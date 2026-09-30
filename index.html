@@ -3,6 +3,7 @@
 <head>
 <base target="_top">
 <meta charset="utf-8">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     color-scheme: light;
@@ -199,6 +200,13 @@
     border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
     display: inline-flex; align-items: center; gap: 6px; font-weight: 600;
   }
+  .demo-banner {
+    display: none; align-items: center; gap: 10px; justify-content: center;
+    background: #fff4d6; color: #8a5a00; border-bottom: 2px solid #f5c542;
+    padding: 10px 16px; font-size: 13px; font-weight: 700; text-align: center;
+  }
+  .demo-banner .demo-banner-text { line-height: 1.4; }
+
   .previa-overlay {
     display: none; position: fixed; inset: 0; background: var(--page); z-index: 100;
     align-items: stretch; justify-content: center; padding: 0; overflow-y: auto;
@@ -466,12 +474,17 @@
     <h1>Monitor OOT</h1>
   </div>
   <div class="header-right">
+    <button id="googleLoginBtn" class="present-btn" type="button" disabled>Carregando login…</button>
     <button class="previa-toggle" id="previaToggle">🧮 Fechamento</button>
     <span class="updated-at" id="updatedAt">—</span>
     <button id="refreshBtn">Atualizar dados</button>
     <button id="presentBtn" class="present-btn" type="button" title="Modo apresentação (tela cheia, ideal pra print)">⛶ Apresentação</button>
   </div>
 </header>
+
+<div id="demoBanner" class="demo-banner" style="display:none">
+  <span class="demo-banner-text">⚠ Modo demonstração — os números aqui são fictícios.</span>
+</div>
 
 <div id="loading">Carregando…</div>
 
@@ -1112,54 +1125,37 @@
     }
   }
 
-  // ---------- Fonte de dados: CSV público da planilha (sem Apps Script) ----------
-  // A atualização do BigQuery continua sendo forçada pelo Apps Script a cada
-  // 5 min (gatilho "autoRefreshDataSource_", configurado direto na planilha
-  // — não precisa mais rodar como Aplicativo da Web pra isso). Esta página é
-  // só um arquivo estático (ex.: GitHub Pages) que lê a mesma planilha via o
-  // link de exportação CSV — funciona só se a planilha estiver compartilhada
-  // como "Qualquer pessoa com o link — Leitor".
+  // ---------- Fonte de dados: login com Google + Sheets API (sem Apps Script) ----------
+  // Esta página fica num link público (GitHub Pages), mas só mostra os
+  // dados REAIS pra quem faz login com uma conta Google que tem acesso à
+  // planilha (mesma regra de hoje: só gente da Mercadolibre SRL com a
+  // planilha compartilhada). Quem não loga, ou loga com uma conta sem
+  // acesso, vê dados FICTÍCIOS (claramente marcados como demonstração) —
+  // a página nunca fica vazia/quebrada, só não vaza nada real pra quem não
+  // deveria ver. A atualização do BigQuery em si continua sendo forçada
+  // pelo Apps Script a cada 5 min também (gatilho "autoRefreshDataSource_",
+  // configurado direto na planilha — não precisa rodar como Aplicativo da
+  // Web pra isso).
+  //
+  // CONFIGURAÇÃO NECESSÁRIA: troque GOOGLE_CLIENT_ID abaixo pelo Client ID
+  // criado no Google Cloud (Credenciais > Criar credenciais > ID do
+  // cliente OAuth, tipo "Aplicativo da Web", com a origem do GitHub Pages
+  // autorizada, e a tela de consentimento marcada como "Interna" pra só
+  // contas da organização conseguirem logar).
+  var GOOGLE_CLIENT_ID = 'COLE_AQUI_SEU_CLIENT_ID.apps.googleusercontent.com';
   var SPREADSHEET_ID = '1WIEx6NN3db-SeIyWQIZlp6kskYuCNttG5uuaWXYc9Es';
-  var SHEET_GID = '1255777483';
-  var CSV_URL = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/export?format=csv&gid=' + SHEET_GID;
+  var SHEET_GID = 1255777483;
+  var SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
 
-  // Parser de CSV simples (suporta campos entre aspas com vírgula/quebra de
-  // linha dentro, e aspas duplicadas pra escapar aspas — é o que o Google
-  // Sheets usa no export). Não precisa de biblioteca externa.
-  function parseCsv(text) {
-    var rows = [];
-    var row = [];
-    var field = '';
-    var inQuotes = false;
-    for (var i = 0; i < text.length; i++) {
-      var c = text[i];
-      if (inQuotes) {
-        if (c === '"') {
-          if (text[i + 1] === '"') { field += '"'; i++; }
-          else inQuotes = false;
-        } else {
-          field += c;
-        }
-      } else if (c === '"') {
-        inQuotes = true;
-      } else if (c === ',') {
-        row.push(field); field = '';
-      } else if (c === '\n') {
-        row.push(field); field = ''; rows.push(row); row = [];
-      } else if (c === '\r') {
-        // ignora — só conta a quebra de linha no \n
-      } else {
-        field += c;
-      }
-    }
-    if (field.length || row.length) { row.push(field); rows.push(row); }
-    return rows;
-  }
+  var googleAccessToken = null;
+  var tokenClient = null;
+  var isDemoMode = true;
 
-  // A coluna DIA vem do export como texto no formato de exibição da célula
-  // (normalmente "DD/MM/AAAA", já visto no formato da Connected Sheet) —
-  // normaliza pra "AAAA-MM-DD", que é o formato que o resto do dashboard
-  // espera (igual ao que o Apps Script mandava antes).
+  function pad2n(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
+
+  // A célula DIA vem como texto no formato de exibição (normalmente
+  // "DD/MM/AAAA") — normaliza pra "AAAA-MM-DD", que é o formato que o
+  // resto do dashboard espera.
   function normalizeDia(v) {
     var s = String(v || '').trim();
     if (!s) return '';
@@ -1169,9 +1165,8 @@
     if (br) return br[3] + '-' + pad2n(br[2]) + '-' + pad2n(br[1]);
     return s;
   }
-  function pad2n(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
 
-  function csvNum(v) {
+  function sheetNum(v) {
     var n = Number(String(v || '').replace(/\./g, '').replace(',', '.'));
     if (isNaN(n)) n = Number(v);
     return isNaN(n) ? 0 : n;
@@ -1179,9 +1174,11 @@
 
   // Mesma ideia do getDashboardData() do Code.gs: acha as colunas pelo
   // cabeçalho (nome exato, sem se importar com a ordem) e monta os mesmos
-  // campos que o resto do dashboard já espera em cada linha.
-  function buildRowsFromCsv(text) {
-    var table = parseCsv(text);
+  // campos que o resto do dashboard já espera em cada linha. "table" é um
+  // array de arrays — a mesma forma que a API do Sheets devolve em
+  // "values" (a primeira linha é o cabeçalho).
+  function buildRowsFromTable(table) {
+    table = (table || []).slice();
     if (!table.length) return [];
     var headers = table.shift();
     var col = {};
@@ -1199,85 +1196,80 @@
         onda: String(r[col.ONDA] || ''),
         canal: String(r[col.CANALIZACAO] || ''),
         cpt: String(r[col.CPT] || ''),
-        totalPacotes: csvNum(r[col.TOTAL_PACOTES]),
-        cotTotal: csvNum(r[col.COT_TOTAL]),
-        dotTotal: csvNum(r[col.DOT_TOTAL]),
-        ootTotal: csvNum(r[col.OOT_TOTAL]),
-        processados: csvNum(r[col.PROCESSADOS]),
-        onTime: csvNum(r[onTimeCol]),
-        prontosExpedicao: csvNum(r[col.PRONTOS_EXPEDICAO]),
-        ofensores: csvNum(r[col.QTD_OFENSORES]),
-        naoLocProcesso: csvNum(r[col.NAO_LOC_PROCESSO]),
-        naoLocExpedicao: csvNum(r[col.NAO_LOC_EXPEDICAO]),
-        atrasoMontagem: csvNum(r[col.ATRASO_MONTAGEM]),
-        atrasoExpedicao: csvNum(r[col.ATRASO_EXPEDICAO]),
-        pendentes: csvNum(r[col.PENDENTES])
+        totalPacotes: sheetNum(r[col.TOTAL_PACOTES]),
+        cotTotal: sheetNum(r[col.COT_TOTAL]),
+        dotTotal: sheetNum(r[col.DOT_TOTAL]),
+        ootTotal: sheetNum(r[col.OOT_TOTAL]),
+        processados: sheetNum(r[col.PROCESSADOS]),
+        onTime: sheetNum(r[onTimeCol]),
+        prontosExpedicao: sheetNum(r[col.PRONTOS_EXPEDICAO]),
+        ofensores: sheetNum(r[col.QTD_OFENSORES]),
+        naoLocProcesso: sheetNum(r[col.NAO_LOC_PROCESSO]),
+        naoLocExpedicao: sheetNum(r[col.NAO_LOC_EXPEDICAO]),
+        atrasoMontagem: sheetNum(r[col.ATRASO_MONTAGEM]),
+        atrasoExpedicao: sheetNum(r[col.ATRASO_EXPEDICAO]),
+        pendentes: sheetNum(r[col.PENDENTES])
       });
     });
     return rows;
   }
 
-  function fetchDashboardRows() {
-    // cache: 'no-store' pra não deixar o navegador servir uma cópia antiga
-    // do CSV em vez de buscar de novo.
-    return fetch(CSV_URL, { cache: 'no-store' }).then(function (resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ao buscar o CSV da planilha.');
-      return resp.text();
-    }).then(function (text) {
-      // Se a planilha não estiver compartilhada como "Qualquer pessoa com o
-      // link", o Google devolve uma página de login em HTML em vez do CSV.
-      if (/^\s*<(!DOCTYPE|html)/i.test(text)) {
-        throw new Error('A planilha não parece estar compartilhada como "Qualquer pessoa com o link — Leitor" (voltou uma página de login em vez do CSV).');
-      }
-      return buildRowsFromCsv(text);
+  // ---- Dados fictícios (modo demonstração) ----
+  // Números redondos de propósito (1000/850/800...) pra ficar óbvio que é
+  // exemplo mesmo sem ler o aviso — mas o aviso (#demoBanner) é o que
+  // garante que ninguém confunda com dado real.
+  function buildDemoRows() {
+    var ondas = ['Amarela', 'Azul', 'Verde'];
+    var cpts = ['03:00', '04:00', '05:00'];
+    var rows = [];
+    ondas.forEach(function (onda) {
+      cpts.forEach(function (cpt) {
+        rows.push({
+          dia: todayStr(), onda: onda, canal: 'DEMO1', cpt: cpt,
+          totalPacotes: 1000, cotTotal: 850, dotTotal: 800, ootTotal: 780,
+          processados: 900, onTime: 780, prontosExpedicao: 100, ofensores: 120,
+          naoLocProcesso: 40, naoLocExpedicao: 30, atrasoMontagem: 20, atrasoExpedicao: 30,
+          pendentes: 0
+        });
+      });
+    });
+    return rows;
+  }
+
+  // ---- Chamadas autenticadas na API do Sheets ----
+  function sheetsApiFetch(url) {
+    return fetch(url, { headers: { Authorization: 'Bearer ' + googleAccessToken } }).then(function (resp) {
+      if (resp.ok) return resp.json();
+      return resp.json().catch(function () { return null; }).then(function (body) {
+        var msg = (body && body.error && body.error.message) ? body.error.message : ('HTTP ' + resp.status);
+        throw new Error(msg);
+      });
     });
   }
 
-  var loadStartedAt = 0;
-  var loadTimeoutId = null;
-  var loadFinished = false;
-
-  function startLoad() {
-    loadFinished = false;
-    loadStartedAt = Date.now();
-    document.getElementById('loading').style.display = 'block';
-    document.getElementById('loading').innerHTML = 'Carregando…';
-    if (loadTimeoutId) clearTimeout(loadTimeoutId);
-    // Às vezes demora — depois de 25s sem resposta, mostra um aviso com
-    // botão de tentar de novo em vez de ficar girando pra sempre.
-    loadTimeoutId = setTimeout(function () {
-      if (loadFinished) return;
-      document.getElementById('loading').innerHTML =
-        'Isso está demorando mais que o normal pra buscar o CSV da planilha.<br><br>' +
-        '<button id="retryLoadBtn" style="border:1px solid var(--border);background:var(--surface-1);color:var(--series-1);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-weight:600;">Tentar novamente</button>';
-      var btn = document.getElementById('retryLoadBtn');
-      if (btn) btn.addEventListener('click', function () { startLoad(); fetchDashboardRows().then(onData).catch(onError); });
-    }, 25000);
+  function fetchRealRows() {
+    var metaUrl = 'https://sheets.googleapis.com/v4/spreadsheets/' + SPREADSHEET_ID + '?fields=sheets.properties';
+    return sheetsApiFetch(metaUrl).then(function (meta) {
+      var sheetTitle = null;
+      (meta.sheets || []).forEach(function (sh) {
+        if (sh.properties && sh.properties.sheetId === SHEET_GID) sheetTitle = sh.properties.title;
+      });
+      if (!sheetTitle) throw new Error('Não achei a aba (gid=' + SHEET_GID + ') nessa planilha.');
+      var valuesUrl = 'https://sheets.googleapis.com/v4/spreadsheets/' + SPREADSHEET_ID + '/values/' + encodeURIComponent(sheetTitle);
+      return sheetsApiFetch(valuesUrl);
+    }).then(function (data) {
+      return buildRowsFromTable(data.values || []);
+    });
   }
 
-  startLoad();
-  fetchDashboardRows().then(onData).catch(onError);
-
-  function onError(err) {
-    loadFinished = true;
-    if (loadTimeoutId) clearTimeout(loadTimeoutId);
-    document.getElementById('loading').innerHTML =
-      'Erro ao carregar dados: ' + (err && err.message ? err.message : err) +
-      '<br><br><button id="retryLoadBtn" style="border:1px solid var(--border);background:var(--surface-1);color:var(--series-1);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-weight:600;">Tentar novamente</button>';
-    var btn = document.getElementById('retryLoadBtn');
-    if (btn) btn.addEventListener('click', function () { startLoad(); fetchDashboardRows().then(onData).catch(onError); });
-  }
-
+  // ---- Renderização (comum pros dois casos — demo e real) ----
   function onData(rows) {
-    loadFinished = true;
-    if (loadTimeoutId) clearTimeout(loadTimeoutId);
     RAW = rows;
-    document.getElementById('updatedAt').textContent = 'Última busca às ' + new Date().toLocaleTimeString('pt-BR') + ' · atualiza sozinho a cada 5 min';
     document.getElementById('loading').style.display = 'none';
-    document.getElementById('loading').textContent = 'Carregando…';
     document.getElementById('app').style.display = 'block';
     document.getElementById('debugError').style.display = 'none';
     document.getElementById('debugError').innerHTML = '';
+    updateDemoBanner();
     // Por padrão, o painel "Filtros avançados" (kpiTotal, tabela, gráficos,
     // accordion) mostrava TODOS os dias da extração, enquanto o Ciclo (topo)
     // mostra só o dia mais recente — o "Total pacotes" batia com uma coisa
@@ -1300,42 +1292,119 @@
     // os valores da extração (RAW) — no primeiro carregamento RAW ainda
     // estava vazio quando a tabela renderizou uma vez lá embaixo no script,
     // então os selects ficavam só com "Selecione". Reconstrói agora que os
-    // dados da query chegaram, e de novo a cada atualização (5 em 5 min).
+    // dados chegaram, e de novo a cada atualização.
     safe('renderPreviaImpacto', renderPreviaImpacto);
     if (timerHandle) clearInterval(timerHandle);
     timerHandle = setInterval(updateCountdown, 1000);
-    startAutoRefresh();
   }
 
-  // Atualização automática do dashboard a cada 5 min — silenciosa, sem
-  // mostrar a tela de "Carregando…" (só busca o CSV de novo e re-renderiza).
-  // Quem força a Connected Sheet do BigQuery a ficar fresca continua sendo
-  // o gatilho de tempo do Apps Script (menu "Monitor OOT > Ativar
-  // atualização automática"), rodando à parte, sem precisar mais publicar
-  // esta página como Aplicativo da Web.
+  function updateDemoBanner(msg) {
+    var banner = document.getElementById('demoBanner');
+    var updatedAt = document.getElementById('updatedAt');
+    if (isDemoMode) {
+      banner.style.display = 'flex';
+      banner.querySelector('.demo-banner-text').textContent =
+        msg || '⚠ Modo demonstração — os números aqui são fictícios.';
+      updatedAt.textContent = 'Modo demonstração';
+    } else {
+      banner.style.display = 'none';
+      updatedAt.textContent = 'Última busca às ' + new Date().toLocaleTimeString('pt-BR') + ' · logado, atualiza sozinho a cada 5 min';
+    }
+  }
+
+  // Carrega o modo demonstração na hora, sem esperar rede nenhuma, pra
+  // página nunca ficar em branco/carregando indefinidamente.
+  onData(buildDemoRows());
+
+  // ---- Login com Google ----
+  function setLoginBtnState(state) {
+    var btn = document.getElementById('googleLoginBtn');
+    if (state === 'checking') { btn.textContent = 'Verificando acesso…'; btn.disabled = true; }
+    else if (state === 'logged-in') { btn.textContent = '✓ Dados reais (logado)'; btn.disabled = false; }
+    else { btn.textContent = 'Fazer login com Google'; btn.disabled = false; }
+  }
+
+  function tryLoadRealData() {
+    setLoginBtnState('checking');
+    fetchRealRows().then(function (rows) {
+      isDemoMode = false;
+      onData(rows);
+      setLoginBtnState('logged-in');
+      startAutoRefresh();
+    }).catch(function (err) {
+      isDemoMode = true;
+      setLoginBtnState('default');
+      updateDemoBanner('⚠ Sua conta não tem acesso aos dados reais desta planilha (' + (err && err.message ? err.message : err) + ') — mostrando dados de demonstração.');
+    });
+  }
+
+  function initGoogleAuth() {
+    if (!window.google || !google.accounts || !google.accounts.oauth2) {
+      setTimeout(initGoogleAuth, 300);
+      return;
+    }
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: SHEETS_SCOPE,
+      callback: function (tokenResponse) {
+        if (tokenResponse && tokenResponse.access_token) {
+          googleAccessToken = tokenResponse.access_token;
+          tryLoadRealData();
+        } else {
+          setLoginBtnState('default');
+          updateDemoBanner('⚠ Não foi possível concluir o login — mostrando dados de demonstração.');
+        }
+      },
+      error_callback: function () {
+        setLoginBtnState('default');
+      }
+    });
+    document.getElementById('googleLoginBtn').disabled = false;
+  }
+  initGoogleAuth();
+
+  document.getElementById('googleLoginBtn').addEventListener('click', function () {
+    if (!tokenClient) return;
+    tokenClient.requestAccessToken();
+  });
+
+  // Atualização automática a cada 5 min — só depois de logado (dado
+  // fictício não muda, não tem por que ficar tentando buscar sozinho antes
+  // do login). Se a sessão expirar no meio do caminho, volta pro modo
+  // demonstração e pede login de novo, em vez de travar com um erro.
   var AUTO_REFRESH_MS = 5 * 60 * 1000;
   var autoRefreshStarted = false;
   function startAutoRefresh() {
     if (autoRefreshStarted) return;
     autoRefreshStarted = true;
     setInterval(function () {
-      fetchDashboardRows().then(onData).catch(function (err) {
-        // Falha silenciosa — não interrompe quem está olhando o dashboard;
-        // a próxima tentativa automática vem em 5 min.
-        console.error('Atualização automática falhou:', err);
+      if (isDemoMode) return;
+      fetchRealRows().then(function (rows) {
+        onData(rows);
+      }).catch(function (err) {
+        console.error('Atualização automática falhou, voltando pro modo demonstração:', err);
+        isDemoMode = true;
+        onData(buildDemoRows());
+        setLoginBtnState('default');
+        updateDemoBanner('⚠ Sua sessão expirou — clique em "Fazer login com Google" de novo pra voltar aos dados reais. Mostrando dados de demonstração.');
       });
     }, AUTO_REFRESH_MS);
   }
 
   document.getElementById('refreshBtn').addEventListener('click', function () {
-    // Sem Apps Script não dá mais pra forçar o refresh do BigQuery na hora —
-    // esse botão agora só busca o CSV de novo (o dado mais recente que a
-    // planilha já tiver; ela mesma se atualiza sozinha a cada 5 min via
-    // gatilho do Apps Script rodando à parte).
-    document.getElementById('loading').textContent = 'Buscando os dados mais recentes da planilha…';
+    if (isDemoMode) {
+      // Sem login não tem nada novo pra buscar — só re-renderiza o demo.
+      onData(buildDemoRows());
+      return;
+    }
+    document.getElementById('loading').textContent = 'Buscando os dados mais recentes…';
     document.getElementById('loading').style.display = 'block';
     document.getElementById('app').style.display = 'none';
-    fetchDashboardRows().then(onData).catch(onError);
+    fetchRealRows().then(onData).catch(function (err) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      updateDemoBanner('⚠ Erro ao atualizar: ' + (err && err.message ? err.message : err));
+    });
   });
 
   // ---------- Exportar CSV (linhas filtradas da tabela Detalhe) ----------
