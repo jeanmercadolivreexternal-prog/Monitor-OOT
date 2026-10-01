@@ -1123,17 +1123,14 @@
     }
   }
 
-  // ---------- Fonte de dados: CSV "Publicado na Web" da planilha (GitHub Pages) ----------
-  // Esta página fica no GitHub Pages (fora do Google) e lê o CSV gerado
-  // pela própria planilha via Arquivo > Compartilhar > Publicar na Web —
-  // diferente do link de "exportar", esse link publicado é feito pelo
-  // Google pra ser consumido por sites externos (não trava por CORS).
-  // Não depende de Apps Script, pop-up, login nem conta de serviço.
-  //
-  // CONFIGURAÇÃO NECESSÁRIA: troque CSV_URL abaixo pelo link gerado em
-  // Arquivo > Compartilhar > Publicar na Web (escolha a aba certa e o
-  // formato CSV) — ver instruções que te mandei.
-  var CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQc-fyDoqCGV0uqloa3Q3Gm_CkAiNb3XG-QCIsnvF13ZXm3osqPCCJ0fwkBGqvpAJHU0E62pJuf_eHI/pub?gid=1255777483&single=true&output=csv';
+  // ---------- Fonte de dados: data.csv dentro do próprio repositório (GitHub Pages) ----------
+  // Esta página lê um arquivo "data.csv" que fica junto dela, no mesmo
+  // repositório do GitHub. Esse arquivo é atualizado sozinho a cada poucos
+  // minutos por um robô do GitHub Actions (.github/workflows/atualizar-dados.yml),
+  // que busca o CSV publicado da planilha e salva aqui dentro.
+  // Como o arquivo é do mesmo site (mesma origem), não existe bloqueio de
+  // CORS — não depende de Apps Script, pop-up, login, proxy nem conta de serviço.
+  var CSV_URL = 'data.csv';
 
   function pad2n(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
 
@@ -1231,40 +1228,15 @@
     return rows;
   }
 
-  // O link "Publicado na Web" do Google não permite leitura via fetch()
-  // direto de outro site (CORS) — só permite abrir/baixar manualmente.
-  // Por isso passamos por um intermediário público que busca o CSV por
-  // trás e devolve com a autorização que o navegador exige. Se o primeiro
-  // intermediário falhar, tenta o segundo automaticamente.
-  var CORS_PROXIES = [
-    function (u) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u); },
-    function (u) { return 'https://corsproxy.io/?url=' + encodeURIComponent(u); }
-  ];
-
   function fetchRealRows() {
-    if (!CSV_URL || CSV_URL.indexOf('COLE_AQUI') !== -1) {
+    if (!CSV_URL) {
       return Promise.reject(new Error('CSV_URL não configurada no index.html'));
     }
     var sep = CSV_URL.indexOf('?') === -1 ? '?' : '&';
-    var directUrl = CSV_URL + sep + '_=' + Date.now();
-
-    function tryProxy(i) {
-      if (i >= CORS_PROXIES.length) {
-        return Promise.reject(new Error('Não consegui buscar os dados da planilha (todas as tentativas falharam)'));
-      }
-      var proxyUrl = CORS_PROXIES[i](directUrl);
-      return fetch(proxyUrl, { cache: 'no-store' }).then(function (resp) {
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        return resp.text();
-      }).then(function (text) {
-        if (!text || text.indexOf('DIA') === -1) throw new Error('resposta inesperada do intermediário');
-        return text;
-      }).catch(function () {
-        return tryProxy(i + 1);
-      });
-    }
-
-    return tryProxy(0).then(function (text) {
+    return fetch(CSV_URL + sep + '_=' + Date.now(), { cache: 'no-store' }).then(function (resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ao ler data.csv — o robô do GitHub Actions já rodou pelo menos uma vez?');
+      return resp.text();
+    }).then(function (text) {
       return buildRowsFromCsvTable(parseCsv(text));
     });
   }
