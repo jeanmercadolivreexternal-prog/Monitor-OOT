@@ -1275,8 +1275,13 @@
   }
 
   // Carrega o modo demonstração na hora, sem esperar rede nenhuma, pra
-  // página nunca ficar em branco/carregando indefinidamente.
-  onData(buildDemoRows());
+  // página nunca ficar em branco/carregando indefinidamente. Em setTimeout
+  // 0 pra só rodar depois que o script inteiro terminar de ser lido — várias
+  // funções de renderização usadas aqui (Prévia de Fechamento, Impactos
+  // operacionais) são definidas mais abaixo no arquivo, e chamá-las direto
+  // nesse ponto do carregamento quebrava com "Cannot read properties of
+  // undefined" porque essas definições ainda não tinham sido executadas.
+  setTimeout(function () { onData(buildDemoRows()); }, 0);
 
   // ---- Botão "Tentar dados reais" (não é um login de verdade — só tenta
   // abrir a ponte do Apps Script de novo; quem já está logado no Google e
@@ -1305,8 +1310,9 @@
 
   // Tenta sozinha assim que a página carrega — quem já está logado no
   // Google com uma conta autorizada nem percebe, os dados reais já aparecem
-  // direto.
-  tryLoadRealData();
+  // direto. Mesmo motivo do setTimeout acima: espera o script inteiro
+  // terminar de carregar antes de chamar as funções de renderização.
+  setTimeout(function () { tryLoadRealData(); }, 0);
 
   document.getElementById('googleLoginBtn').addEventListener('click', function () {
     tryLoadRealData();
