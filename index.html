@@ -1186,7 +1186,15 @@
   }
 
   // ---- Busca os dados reais através do iframe-ponte do Apps Script ----
-  function requestRealData() {
+  // Tentativa SILENCIOSA via <iframe> escondido — funciona quando o
+  // navegador permite que o iframe use a sessão do Google já logada
+  // (cookie de terceiros). É o que roda sozinho ao abrir a página e nas
+  // atualizações automáticas de 5 em 5 minutos, sem pedir nada pra pessoa.
+  // Em navegadores que bloqueiam cookie de terceiros (cada vez mais comum
+  // no Chrome), esse método simplesmente não recebe nada e cai no tempo
+  // esgotado — por isso existe a versão por pop-up abaixo, que não depende
+  // de cookie de terceiros.
+  function requestRealDataIframe() {
     return new Promise(function (resolve, reject) {
       if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('COLE_AQUI') !== -1) {
         reject(new Error('APPS_SCRIPT_URL não configurada no index.html'));
@@ -1221,6 +1229,55 @@
       bridgeFrame.style.display = 'none';
       bridgeFrame.src = APPS_SCRIPT_URL + (APPS_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&') + 'bridge=1&_=' + Date.now();
       document.body.appendChild(bridgeFrame);
+    });
+  }
+
+  // Tentativa por POP-UP, usada sempre que a pessoa clica num botão
+  // (gesto do usuário — por isso o navegador deixa abrir a janela sem
+  // bloquear). Como é uma janela de verdade (não um iframe de terceiro),
+  // NÃO esbarra no bloqueio de cookie de terceiros do Chrome — é o método
+  // confiável quando o silencioso acima falha.
+  function requestRealDataPopup() {
+    return new Promise(function (resolve, reject) {
+      if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('COLE_AQUI') !== -1) {
+        reject(new Error('APPS_SCRIPT_URL não configurada no index.html'));
+        return;
+      }
+      var done = false;
+      var popup;
+      try {
+        popup = window.open(
+          APPS_SCRIPT_URL + (APPS_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&') + 'bridge=1&_=' + Date.now(),
+          'monitorOotBridge',
+          'width=480,height=520'
+        );
+      } catch (e) { popup = null; }
+      if (!popup) {
+        reject(new Error('o navegador bloqueou a janela — permita pop-ups para este site e clique de novo'));
+        return;
+      }
+      var msgHandler, timer;
+      function cleanup() {
+        if (msgHandler) { window.removeEventListener('message', msgHandler); msgHandler = null; }
+        if (timer) { clearTimeout(timer); timer = null; }
+        try { if (popup && !popup.closed) popup.close(); } catch (e) { /* ignora */ }
+      }
+      timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('tempo esgotado — sem acesso ou não concluiu o login na janela'));
+      }, BRIDGE_TIMEOUT_MS);
+      msgHandler = function (e) {
+        if (done) return;
+        var data = e.data;
+        if (!data || typeof data !== 'object' || !('ok' in data)) return;
+        done = true;
+        cleanup();
+        if (data.ok) resolve(buildRowsFromPayload(data.payload));
+        else reject(new Error(data.error || 'sem acesso aos dados'));
+      };
+      window.addEventListener('message', msgHandler);
     });
   }
 
@@ -1260,16 +1317,16 @@
     timerHandle = setInterval(updateCountdown, 1000);
   }
 
+  // A faixa amarela de aviso (#demoBanner) foi removida da tela a pedido —
+  // fica só o textinho discreto ao lado dos botões ("Modo demonstração"),
+  // sem chamar tanto a atenção.
   function updateDemoBanner(msg) {
     var banner = document.getElementById('demoBanner');
     var updatedAt = document.getElementById('updatedAt');
+    banner.style.display = 'none';
     if (isDemoMode) {
-      banner.style.display = 'flex';
-      banner.querySelector('.demo-banner-text').textContent =
-        msg || '⚠ Modo demonstração — os números aqui são fictícios.';
       updatedAt.textContent = 'Modo demonstração';
     } else {
-      banner.style.display = 'none';
       updatedAt.textContent = 'Última busca às ' + new Date().toLocaleTimeString('pt-BR') + ' · logado, atualiza sozinho a cada 5 min';
     }
   }
@@ -1294,9 +1351,26 @@
     else { btn.textContent = 'Tentar dados reais'; btn.disabled = false; }
   }
 
-  function tryLoadRealData() {
+  // viaPopup=false (automático/silencioso, sem gesto do usuário): usa o
+  // iframe escondido. viaPopup=true (a pessoa clicou em algum botão): usa a
+  // janela pop-up, que não esbarra no bloqueio de cookie de terceiros.
+  function tryLoadRealData(viaPopup) {
     setLoginBtnState('checking');
-    requestRealData().then(function (rows) {
+    var p = viaPopup ? requestRealDataPopup() : requestRealDataIframe();
+    p.then(function (rows) {
+      // Primeira vez que os dados reais chegam depois do modo demonstração
+      // (que usa "hoje" como dia fictício): o dia padrão selecionado — nos
+      // Filtros avançados E no Ciclo (topo da página) — foi calculado em
+      // cima do dado fictício, não da extração de verdade. Recalcula os
+      // dois agora que os dados reais chegaram, senão o dashboard podia
+      // ficar preso mostrando um dia que nem é o mais recente da extração
+      // real (foi exatamente o que aconteceu num teste: o Ciclo continuou
+      // preso no "hoje" do modo demonstração mesmo depois do login).
+      if (isDemoMode) {
+        filtersDiaDefaulted = false;
+        filters.dias = new Set();
+        cicloDiaSel = new Set();
+      }
       isDemoMode = false;
       onData(rows);
       setLoginBtnState('logged-in');
@@ -1308,20 +1382,25 @@
     });
   }
 
-  // Tenta sozinha assim que a página carrega — quem já está logado no
-  // Google com uma conta autorizada nem percebe, os dados reais já aparecem
-  // direto. Mesmo motivo do setTimeout acima: espera o script inteiro
-  // terminar de carregar antes de chamar as funções de renderização.
-  setTimeout(function () { tryLoadRealData(); }, 0);
+  // Tenta sozinha (silenciosa, via iframe) assim que a página carrega —
+  // funciona direto pra quem o navegador deixa usar a sessão do Google
+  // dentro do iframe. Se o navegador bloquear isso (cookie de terceiros),
+  // a pessoa ainda consegue clicar no botão "Tentar dados reais", que usa
+  // pop-up e não tem esse problema. Mesmo motivo do setTimeout acima:
+  // espera o script inteiro terminar de carregar antes de chamar as
+  // funções de renderização.
+  setTimeout(function () { tryLoadRealData(false); }, 0);
 
   document.getElementById('googleLoginBtn').addEventListener('click', function () {
-    tryLoadRealData();
+    tryLoadRealData(true);
   });
 
   // Atualização automática a cada 5 min — só depois de confirmar acesso
   // real (dado fictício não muda, não tem por que ficar tentando buscar
-  // sozinho antes disso). Se a sessão expirar no meio do caminho, volta pro
-  // modo demonstração em vez de travar com um erro.
+  // sozinho antes disso). Essa atualização em segundo plano não tem gesto
+  // do usuário, então só pode tentar pelo iframe — se o navegador bloquear,
+  // MANTÉM os últimos dados reais na tela (não volta pro demo sozinho) e só
+  // avisa que precisa de um clique em "Tentar dados reais" pra atualizar.
   var AUTO_REFRESH_MS = 5 * 60 * 1000;
   var autoRefreshStarted = false;
   function startAutoRefresh() {
@@ -1329,29 +1408,30 @@
     autoRefreshStarted = true;
     setInterval(function () {
       if (isDemoMode) return;
-      requestRealData().then(function (rows) {
+      requestRealDataIframe().then(function (rows) {
         onData(rows);
       }).catch(function (err) {
-        console.error('Atualização automática falhou, voltando pro modo demonstração:', err);
-        isDemoMode = true;
-        onData(buildDemoRows());
+        console.error('Atualização automática (silenciosa) falhou — mantendo os últimos dados reais na tela:', err);
         setLoginBtnState('default');
-        updateDemoBanner('⚠ Perdeu o acesso aos dados reais — clique em "Tentar dados reais" de novo. Mostrando dados de demonstração.');
+        var banner = document.getElementById('demoBanner');
+        banner.style.display = 'flex';
+        banner.querySelector('.demo-banner-text').textContent =
+          '⚠ Não consegui atualizar sozinho em segundo plano — os números na tela são os últimos carregados. Clique em "Tentar dados reais" pra atualizar agora.';
       });
     }, AUTO_REFRESH_MS);
   }
 
   document.getElementById('refreshBtn').addEventListener('click', function () {
     if (isDemoMode) {
-      // Sem acesso real confirmado ainda, tenta de novo em vez de só
-      // re-renderizar o demo — a pessoa pode ter acabado de logar.
-      tryLoadRealData();
+      // Sem acesso real confirmado ainda, tenta de novo (via pop-up, já
+      // que é um clique) em vez de só re-renderizar o demo.
+      tryLoadRealData(true);
       return;
     }
     document.getElementById('loading').textContent = 'Buscando os dados mais recentes…';
     document.getElementById('loading').style.display = 'block';
     document.getElementById('app').style.display = 'none';
-    requestRealData().then(onData).catch(function (err) {
+    requestRealDataPopup().then(onData).catch(function (err) {
       document.getElementById('loading').style.display = 'none';
       document.getElementById('app').style.display = 'block';
       updateDemoBanner('⚠ Erro ao atualizar: ' + (err && err.message ? err.message : err));
