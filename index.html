@@ -1231,15 +1231,40 @@
     return rows;
   }
 
+  // O link "Publicado na Web" do Google não permite leitura via fetch()
+  // direto de outro site (CORS) — só permite abrir/baixar manualmente.
+  // Por isso passamos por um intermediário público que busca o CSV por
+  // trás e devolve com a autorização que o navegador exige. Se o primeiro
+  // intermediário falhar, tenta o segundo automaticamente.
+  var CORS_PROXIES = [
+    function (u) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u); },
+    function (u) { return 'https://corsproxy.io/?url=' + encodeURIComponent(u); }
+  ];
+
   function fetchRealRows() {
     if (!CSV_URL || CSV_URL.indexOf('COLE_AQUI') !== -1) {
       return Promise.reject(new Error('CSV_URL não configurada no index.html'));
     }
     var sep = CSV_URL.indexOf('?') === -1 ? '?' : '&';
-    return fetch(CSV_URL + sep + '_=' + Date.now(), { cache: 'no-store' }).then(function (resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.text();
-    }).then(function (text) {
+    var directUrl = CSV_URL + sep + '_=' + Date.now();
+
+    function tryProxy(i) {
+      if (i >= CORS_PROXIES.length) {
+        return Promise.reject(new Error('Não consegui buscar os dados da planilha (todas as tentativas falharam)'));
+      }
+      var proxyUrl = CORS_PROXIES[i](directUrl);
+      return fetch(proxyUrl, { cache: 'no-store' }).then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.text();
+      }).then(function (text) {
+        if (!text || text.indexOf('DIA') === -1) throw new Error('resposta inesperada do intermediário');
+        return text;
+      }).catch(function () {
+        return tryProxy(i + 1);
+      });
+    }
+
+    return tryProxy(0).then(function (text) {
       return buildRowsFromCsvTable(parseCsv(text));
     });
   }
