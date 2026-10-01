@@ -473,7 +473,6 @@
     <h1>Monitor OOT</h1>
   </div>
   <div class="header-right">
-    <button id="googleLoginBtn" class="present-btn" type="button" disabled>Verificando acesso…</button>
     <button class="previa-toggle" id="previaToggle">🧮 Fechamento</button>
     <span class="updated-at" id="updatedAt">—</span>
     <button id="refreshBtn">Atualizar dados</button>
@@ -482,7 +481,7 @@
 </header>
 
 <div id="demoBanner" class="demo-banner" style="display:none">
-  <span class="demo-banner-text">⚠ Modo demonstração — os números aqui são fictícios.</span>
+  <span class="demo-banner-text">⚠ Não consegui carregar os dados — mostrando a última versão disponível.</span>
 </div>
 
 <div id="loading">Carregando…</div>
@@ -1124,171 +1123,137 @@
     }
   }
 
-  // ---------- Fonte de dados: ponte via Apps Script (sem Cloud Console) ----------
-  // Esta página fica num link público (GitHub Pages), mas os dados REAIS só
-  // chegam pra quem está logado no navegador com uma conta Google que tem
-  // acesso ao Aplicativo da Web do Apps Script — que deve ser implantado
-  // com "Quem pode acessar: Qualquer pessoa em mercadolivre.com" (restrito
-  // à organização, sem precisar criar nada no Google Cloud Console). Quem
-  // não tem acesso (ou não está logado) nunca recebe os dados reais — cai
-  // sozinho no modo demonstração (dados FICTÍCIOS, claramente marcados).
+  // ---------- Fonte de dados: CSV "Publicado na Web" da planilha (GitHub Pages) ----------
+  // Esta página fica no GitHub Pages (fora do Google) e lê o CSV gerado
+  // pela própria planilha via Arquivo > Compartilhar > Publicar na Web —
+  // diferente do link de "exportar", esse link publicado é feito pelo
+  // Google pra ser consumido por sites externos (não trava por CORS).
+  // Não depende de Apps Script, pop-up, login nem conta de serviço.
   //
-  // Como funciona: a página carrega a URL do Apps Script (terminando em
-  // "?bridge=1") dentro de um <iframe> escondido. O navegador usa a sessão
-  // do Google já logada pra abrir essa URL; se a pessoa tiver acesso, o
-  // Apps Script devolve uma páginazinha que manda os dados pro pai via
-  // postMessage. Se não tiver acesso (ou não estiver logada), nada chega e,
-  // depois de alguns segundos, a página desiste e mostra o modo
-  // demonstração.
-  //
-  // CONFIGURAÇÃO NECESSÁRIA: troque APPS_SCRIPT_URL abaixo pela URL do seu
-  // Aplicativo da Web do Apps Script (Implantar > Gerenciar implantações >
-  // copiar a URL que termina em "/exec").
-  var APPS_SCRIPT_URL = 'https://script.google.com/a/macros/mercadolivre.com/s/AKfycbwxyMlClVWU_ipX1vqog3vrVoQF9J3wIbB6Ra48zkRHeL9WWSJOPeflzGTjiF9HEwqr/exec';
-  var BRIDGE_TIMEOUT_MS = 10000;
-  var isDemoMode = true;
-  var bridgeFrame = null;
-  var bridgeMsgHandler = null;
+  // CONFIGURAÇÃO NECESSÁRIA: troque CSV_URL abaixo pelo link gerado em
+  // Arquivo > Compartilhar > Publicar na Web (escolha a aba certa e o
+  // formato CSV) — ver instruções que te mandei.
+  var CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQc-fyDoqCGV0uqloa3Q3Gm_CkAiNb3XG-QCIsnvF13ZXm3osqPCCJ0fwkBGqvpAJHU0E62pJuf_eHI/pub?gid=1255777483&single=true&output=csv';
 
-  // Converte o payload compacto do Code.gs ({ fields: [...], rows: [[...],[...]] })
-  // de volta em objetos { dia, onda, canal, ... } — mesma forma que o resto
-  // do dashboard já espera.
-  function buildRowsFromPayload(payload) {
-    var fields = (payload && payload.fields) || [];
-    var rowsArr = (payload && payload.rows) || [];
-    return rowsArr.map(function (arr) {
-      var o = {};
-      fields.forEach(function (f, i) { o[f] = arr[i]; });
-      return o;
-    });
+  function pad2n(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
+
+  // A célula DIA vem como texto no formato de exibição (normalmente
+  // "DD/MM/AAAA") — normaliza pra "AAAA-MM-DD", que é o formato que o
+  // resto do dashboard espera.
+  function normalizeDia(v) {
+    var s = String(v || '').trim();
+    if (!s) return '';
+    var iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (iso) return iso[1] + '-' + pad2n(iso[2]) + '-' + pad2n(iso[3]);
+    var br = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (br) return br[3] + '-' + pad2n(br[2]) + '-' + pad2n(br[1]);
+    return s;
   }
 
-  // ---- Dados fictícios (modo demonstração) ----
-  // Números redondos de propósito (1000/850/800...) pra ficar óbvio que é
-  // exemplo mesmo sem ler o aviso — mas o aviso (#demoBanner) é o que
-  // garante que ninguém confunda com dado real.
-  function buildDemoRows() {
-    var ondas = ['Amarela', 'Azul', 'Verde'];
-    var cpts = ['03:00', '04:00', '05:00'];
+  function csvNum(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (!s) return 0;
+    // número com vírgula decimal (ex.: "0,72") vira ponto; separador de
+    // milhar (ponto), quando junto com vírgula decimal, é removido antes.
+    if (s.indexOf(',') !== -1) s = s.replace(/\./g, '').replace(',', '.');
+    var n = Number(s);
+    return isNaN(n) ? 0 : n;
+  }
+
+  // Parser de CSV simples que entende campos entre aspas (com vírgula ou
+  // quebra de linha dentro) — o formato que o export do Google Sheets usa.
+  function parseCsv(text) {
     var rows = [];
-    ondas.forEach(function (onda) {
-      cpts.forEach(function (cpt) {
-        rows.push({
-          dia: todayStr(), onda: onda, canal: 'DEMO1', cpt: cpt,
-          totalPacotes: 1000, cotTotal: 850, dotTotal: 800, ootTotal: 780,
-          processados: 900, onTime: 780, prontosExpedicao: 100, ofensores: 120,
-          naoLocProcesso: 40, naoLocExpedicao: 30, atrasoMontagem: 20, atrasoExpedicao: 30,
-          pendentes: 0
-        });
+    var row = [];
+    var field = '';
+    var inQuotes = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else { inQuotes = false; }
+        } else {
+          field += c;
+        }
+      } else if (c === '"') {
+        inQuotes = true;
+      } else if (c === ',') {
+        row.push(field); field = '';
+      } else if (c === '\n') {
+        row.push(field); rows.push(row); row = []; field = '';
+      } else if (c === '\r') {
+        // ignora — o \n cuida da quebra de linha
+      } else {
+        field += c;
+      }
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+
+  // Mesma ideia do getDashboardData() do Code.gs: acha as colunas pelo
+  // cabeçalho (nome exato, sem se importar com a ordem) e monta os mesmos
+  // campos que o resto do dashboard já espera em cada linha.
+  function buildRowsFromCsvTable(table) {
+    table = (table || []).slice();
+    if (!table.length) return [];
+    var headers = table.shift();
+    var col = {};
+    headers.forEach(function (h, i) { col[String(h).trim()] = i; });
+    // Se ON_TIME_TOTAL não existir na extração, usa OOT_TOTAL no lugar —
+    // mesmo conceito (pacotes que saíram dentro do prazo), já como total
+    // exato.
+    var onTimeCol = (col.ON_TIME_TOTAL !== undefined) ? col.ON_TIME_TOTAL : col.OOT_TOTAL;
+    var rows = [];
+    table.forEach(function (r) {
+      if (col.DIA === undefined || r[col.DIA] === undefined || r[col.DIA] === '') return;
+      rows.push({
+        dia: normalizeDia(r[col.DIA]),
+        onda: String(r[col.ONDA] || ''),
+        canal: String(r[col.CANALIZACAO] || ''),
+        cpt: String(r[col.CPT] || ''),
+        totalPacotes: csvNum(r[col.TOTAL_PACOTES]),
+        cotTotal: csvNum(r[col.COT_TOTAL]),
+        dotTotal: csvNum(r[col.DOT_TOTAL]),
+        ootTotal: csvNum(r[col.OOT_TOTAL]),
+        processados: csvNum(r[col.PROCESSADOS]),
+        onTime: csvNum(r[onTimeCol]),
+        prontosExpedicao: csvNum(r[col.PRONTOS_EXPEDICAO]),
+        ofensores: csvNum(r[col.QTD_OFENSORES]),
+        naoLocProcesso: csvNum(r[col.NAO_LOC_PROCESSO]),
+        naoLocExpedicao: csvNum(r[col.NAO_LOC_EXPEDICAO]),
+        atrasoMontagem: csvNum(r[col.ATRASO_MONTAGEM]),
+        atrasoExpedicao: csvNum(r[col.ATRASO_EXPEDICAO]),
+        pendentes: csvNum(r[col.PENDENTES])
       });
     });
     return rows;
   }
 
-  // ---- Busca os dados reais através do iframe-ponte do Apps Script ----
-  // Tentativa SILENCIOSA via <iframe> escondido — funciona quando o
-  // navegador permite que o iframe use a sessão do Google já logada
-  // (cookie de terceiros). É o que roda sozinho ao abrir a página e nas
-  // atualizações automáticas de 5 em 5 minutos, sem pedir nada pra pessoa.
-  // Em navegadores que bloqueiam cookie de terceiros (cada vez mais comum
-  // no Chrome), esse método simplesmente não recebe nada e cai no tempo
-  // esgotado — por isso existe a versão por pop-up abaixo, que não depende
-  // de cookie de terceiros.
-  function requestRealDataIframe() {
-    return new Promise(function (resolve, reject) {
-      if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('COLE_AQUI') !== -1) {
-        reject(new Error('APPS_SCRIPT_URL não configurada no index.html'));
-        return;
-      }
-      var done = false;
-      function cleanup() {
-        if (bridgeMsgHandler) { window.removeEventListener('message', bridgeMsgHandler); bridgeMsgHandler = null; }
-        if (bridgeFrame && bridgeFrame.parentNode) bridgeFrame.parentNode.removeChild(bridgeFrame);
-        bridgeFrame = null;
-      }
-      var timer = setTimeout(function () {
-        if (done) return;
-        done = true;
-        cleanup();
-        reject(new Error('tempo esgotado — sem acesso ou sessão do Google não encontrada'));
-      }, BRIDGE_TIMEOUT_MS);
-
-      bridgeMsgHandler = function (e) {
-        if (done) return;
-        var data = e.data;
-        if (!data || typeof data !== 'object' || !('ok' in data)) return;
-        done = true;
-        clearTimeout(timer);
-        cleanup();
-        if (data.ok) resolve(buildRowsFromPayload(data.payload));
-        else reject(new Error(data.error || 'sem acesso aos dados'));
-      };
-      window.addEventListener('message', bridgeMsgHandler);
-
-      bridgeFrame = document.createElement('iframe');
-      bridgeFrame.style.display = 'none';
-      bridgeFrame.src = APPS_SCRIPT_URL + (APPS_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&') + 'bridge=1&_=' + Date.now();
-      document.body.appendChild(bridgeFrame);
+  function fetchRealRows() {
+    if (!CSV_URL || CSV_URL.indexOf('COLE_AQUI') !== -1) {
+      return Promise.reject(new Error('CSV_URL não configurada no index.html'));
+    }
+    var sep = CSV_URL.indexOf('?') === -1 ? '?' : '&';
+    return fetch(CSV_URL + sep + '_=' + Date.now(), { cache: 'no-store' }).then(function (resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.text();
+    }).then(function (text) {
+      return buildRowsFromCsvTable(parseCsv(text));
     });
   }
 
-  // Tentativa por POP-UP, usada sempre que a pessoa clica num botão
-  // (gesto do usuário — por isso o navegador deixa abrir a janela sem
-  // bloquear). Como é uma janela de verdade (não um iframe de terceiro),
-  // NÃO esbarra no bloqueio de cookie de terceiros do Chrome — é o método
-  // confiável quando o silencioso acima falha.
-  function requestRealDataPopup() {
-    return new Promise(function (resolve, reject) {
-      if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('COLE_AQUI') !== -1) {
-        reject(new Error('APPS_SCRIPT_URL não configurada no index.html'));
-        return;
-      }
-      var done = false;
-      var popup;
-      try {
-        popup = window.open(
-          APPS_SCRIPT_URL + (APPS_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&') + 'bridge=1&_=' + Date.now(),
-          'monitorOotBridge',
-          'width=480,height=520'
-        );
-      } catch (e) { popup = null; }
-      if (!popup) {
-        reject(new Error('o navegador bloqueou a janela — permita pop-ups para este site e clique de novo'));
-        return;
-      }
-      var msgHandler, timer;
-      function cleanup() {
-        if (msgHandler) { window.removeEventListener('message', msgHandler); msgHandler = null; }
-        if (timer) { clearTimeout(timer); timer = null; }
-        try { if (popup && !popup.closed) popup.close(); } catch (e) { /* ignora */ }
-      }
-      timer = setTimeout(function () {
-        if (done) return;
-        done = true;
-        cleanup();
-        reject(new Error('tempo esgotado — sem acesso ou não concluiu o login na janela'));
-      }, BRIDGE_TIMEOUT_MS);
-      msgHandler = function (e) {
-        if (done) return;
-        var data = e.data;
-        if (!data || typeof data !== 'object' || !('ok' in data)) return;
-        done = true;
-        cleanup();
-        if (data.ok) resolve(buildRowsFromPayload(data.payload));
-        else reject(new Error(data.error || 'sem acesso aos dados'));
-      };
-      window.addEventListener('message', msgHandler);
-    });
-  }
-
-  // ---- Renderização (comum pros dois casos — demo e real) ----
+  // ---- Renderização ----
   function onData(rows) {
     RAW = rows;
     document.getElementById('loading').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     document.getElementById('debugError').style.display = 'none';
     document.getElementById('debugError').innerHTML = '';
-    updateDemoBanner();
+    document.getElementById('demoBanner').style.display = 'none';
+    document.getElementById('updatedAt').textContent =
+      'Última busca às ' + new Date().toLocaleTimeString('pt-BR') + ' · atualiza sozinho a cada 5 min';
     // Por padrão, o painel "Filtros avançados" (kpiTotal, tabela, gráficos,
     // accordion) mostrava TODOS os dias da extração, enquanto o Ciclo (topo)
     // mostra só o dia mais recente — o "Total pacotes" batia com uma coisa
@@ -1317,124 +1282,63 @@
     timerHandle = setInterval(updateCountdown, 1000);
   }
 
-  // A faixa amarela de aviso (#demoBanner) foi removida da tela a pedido —
-  // fica só o textinho discreto ao lado dos botões ("Modo demonstração"),
-  // sem chamar tanto a atenção.
-  function updateDemoBanner(msg) {
-    var banner = document.getElementById('demoBanner');
-    var updatedAt = document.getElementById('updatedAt');
-    banner.style.display = 'none';
-    if (isDemoMode) {
-      updatedAt.textContent = 'Modo demonstração';
-    } else {
-      updatedAt.textContent = 'Última busca às ' + new Date().toLocaleTimeString('pt-BR') + ' · logado, atualiza sozinho a cada 5 min';
-    }
+  function showLoadError(err) {
+    var box = document.getElementById('loading');
+    box.innerHTML = 'Erro ao carregar dados: ' + (err && err.message ? err.message : err) +
+      '<br><button id="retryLoadBtn" style="margin-top:12px">Tentar novamente</button>';
+    box.style.display = 'block';
+    document.getElementById('app').style.display = 'none';
+    var btn = document.getElementById('retryLoadBtn');
+    if (btn) btn.addEventListener('click', loadInitial);
   }
 
-  // Carrega o modo demonstração na hora, sem esperar rede nenhuma, pra
-  // página nunca ficar em branco/carregando indefinidamente. Em setTimeout
-  // 0 pra só rodar depois que o script inteiro terminar de ser lido — várias
-  // funções de renderização usadas aqui (Prévia de Fechamento, Impactos
-  // operacionais) são definidas mais abaixo no arquivo, e chamá-las direto
-  // nesse ponto do carregamento quebrava com "Cannot read properties of
-  // undefined" porque essas definições ainda não tinham sido executadas.
-  setTimeout(function () { onData(buildDemoRows()); }, 0);
-
-  // ---- Botão "Tentar dados reais" (não é um login de verdade — só tenta
-  // abrir a ponte do Apps Script de novo; quem já está logado no Google e
-  // tem acesso nem precisa clicar, a tentativa automática no carregamento
-  // da página já resolve sozinha) ----
-  function setLoginBtnState(state) {
-    var btn = document.getElementById('googleLoginBtn');
-    if (state === 'checking') { btn.textContent = 'Verificando acesso…'; btn.disabled = true; }
-    else if (state === 'logged-in') { btn.textContent = '✓ Dados reais'; btn.disabled = false; }
-    else { btn.textContent = 'Tentar dados reais'; btn.disabled = false; }
-  }
-
-  // viaPopup=false (automático/silencioso, sem gesto do usuário): usa o
-  // iframe escondido. viaPopup=true (a pessoa clicou em algum botão): usa a
-  // janela pop-up, que não esbarra no bloqueio de cookie de terceiros.
-  function tryLoadRealData(viaPopup) {
-    setLoginBtnState('checking');
-    var p = viaPopup ? requestRealDataPopup() : requestRealDataIframe();
-    p.then(function (rows) {
-      // Primeira vez que os dados reais chegam depois do modo demonstração
-      // (que usa "hoje" como dia fictício): o dia padrão selecionado — nos
-      // Filtros avançados E no Ciclo (topo da página) — foi calculado em
-      // cima do dado fictício, não da extração de verdade. Recalcula os
-      // dois agora que os dados reais chegaram, senão o dashboard podia
-      // ficar preso mostrando um dia que nem é o mais recente da extração
-      // real (foi exatamente o que aconteceu num teste: o Ciclo continuou
-      // preso no "hoje" do modo demonstração mesmo depois do login).
-      if (isDemoMode) {
-        filtersDiaDefaulted = false;
-        filters.dias = new Set();
-        cicloDiaSel = new Set();
-      }
-      isDemoMode = false;
+  function loadInitial() {
+    document.getElementById('loading').textContent = 'Carregando…';
+    document.getElementById('loading').style.display = 'block';
+    document.getElementById('app').style.display = 'none';
+    fetchRealRows().then(function (rows) {
       onData(rows);
-      setLoginBtnState('logged-in');
       startAutoRefresh();
-    }).catch(function (err) {
-      isDemoMode = true;
-      setLoginBtnState('default');
-      updateDemoBanner('⚠ Não foi possível carregar os dados reais (' + (err && err.message ? err.message : err) + ') — mostrando dados de demonstração. Se você tem acesso à planilha, confira se está logado com sua conta @mercadolivre.com e clique em "Tentar dados reais".');
-    });
+    }).catch(showLoadError);
   }
+  // setTimeout 0 pra só rodar depois que o script inteiro terminar de ser
+  // lido — várias funções de renderização usadas aqui (Prévia de
+  // Fechamento, Impactos operacionais) são definidas mais abaixo no
+  // arquivo, e chamá-las antes disso quebrava com "Cannot read properties
+  // of undefined".
+  setTimeout(loadInitial, 0);
 
-  // Tenta sozinha (silenciosa, via iframe) assim que a página carrega —
-  // funciona direto pra quem o navegador deixa usar a sessão do Google
-  // dentro do iframe. Se o navegador bloquear isso (cookie de terceiros),
-  // a pessoa ainda consegue clicar no botão "Tentar dados reais", que usa
-  // pop-up e não tem esse problema. Mesmo motivo do setTimeout acima:
-  // espera o script inteiro terminar de carregar antes de chamar as
-  // funções de renderização.
-  setTimeout(function () { tryLoadRealData(false); }, 0);
-
-  document.getElementById('googleLoginBtn').addEventListener('click', function () {
-    tryLoadRealData(true);
-  });
-
-  // Atualização automática a cada 5 min — só depois de confirmar acesso
-  // real (dado fictício não muda, não tem por que ficar tentando buscar
-  // sozinho antes disso). Essa atualização em segundo plano não tem gesto
-  // do usuário, então só pode tentar pelo iframe — se o navegador bloquear,
-  // MANTÉM os últimos dados reais na tela (não volta pro demo sozinho) e só
-  // avisa que precisa de um clique em "Tentar dados reais" pra atualizar.
+  // Atualização automática a cada 5 min. Se uma atualização falhar (rede
+  // instável, por exemplo), mantém os últimos dados na tela em vez de
+  // apagar tudo, e só avisa discretamente.
   var AUTO_REFRESH_MS = 5 * 60 * 1000;
   var autoRefreshStarted = false;
   function startAutoRefresh() {
     if (autoRefreshStarted) return;
     autoRefreshStarted = true;
     setInterval(function () {
-      if (isDemoMode) return;
-      requestRealDataIframe().then(function (rows) {
+      fetchRealRows().then(function (rows) {
         onData(rows);
       }).catch(function (err) {
-        console.error('Atualização automática (silenciosa) falhou — mantendo os últimos dados reais na tela:', err);
-        setLoginBtnState('default');
+        console.error('Atualização automática falhou — mantendo os últimos dados na tela:', err);
         var banner = document.getElementById('demoBanner');
         banner.style.display = 'flex';
         banner.querySelector('.demo-banner-text').textContent =
-          '⚠ Não consegui atualizar sozinho em segundo plano — os números na tela são os últimos carregados. Clique em "Tentar dados reais" pra atualizar agora.';
+          '⚠ Não consegui atualizar sozinho agora — os números na tela são os últimos carregados. Clique em "Atualizar dados" pra tentar de novo.';
       });
     }, AUTO_REFRESH_MS);
   }
 
   document.getElementById('refreshBtn').addEventListener('click', function () {
-    if (isDemoMode) {
-      // Sem acesso real confirmado ainda, tenta de novo (via pop-up, já
-      // que é um clique) em vez de só re-renderizar o demo.
-      tryLoadRealData(true);
-      return;
-    }
     document.getElementById('loading').textContent = 'Buscando os dados mais recentes…';
     document.getElementById('loading').style.display = 'block';
     document.getElementById('app').style.display = 'none';
-    requestRealDataPopup().then(onData).catch(function (err) {
+    fetchRealRows().then(onData).catch(function (err) {
       document.getElementById('loading').style.display = 'none';
       document.getElementById('app').style.display = 'block';
-      updateDemoBanner('⚠ Erro ao atualizar: ' + (err && err.message ? err.message : err));
+      var banner = document.getElementById('demoBanner');
+      banner.style.display = 'flex';
+      banner.querySelector('.demo-banner-text').textContent = '⚠ Erro ao atualizar: ' + (err && err.message ? err.message : err);
     });
   });
 
