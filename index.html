@@ -1123,14 +1123,23 @@
     }
   }
 
-  // ---------- Fonte de dados: data.csv dentro do próprio repositório (GitHub Pages) ----------
-  // Esta página lê um arquivo "data.csv" que fica junto dela, no mesmo
-  // repositório do GitHub. Esse arquivo é atualizado sozinho a cada poucos
-  // minutos por um robô do GitHub Actions (.github/workflows/atualizar-dados.yml),
-  // que busca o CSV publicado da planilha e salva aqui dentro.
-  // Como o arquivo é do mesmo site (mesma origem), não existe bloqueio de
-  // CORS — não depende de Apps Script, pop-up, login, proxy nem conta de serviço.
-  var CSV_URL = 'data.csv';
+  // ---------- Fonte de dados: API de visualização do Google (gviz) ----------
+  // Esse é outro link que o próprio Google disponibiliza, diferente dos
+  // dois que já tentamos (exportar e publicar na web): foi feito
+  // especificamente pra sites externos lerem dados de uma planilha pública
+  // direto pelo navegador (é a base de qualquer "gráfico incorporado" do
+  // Google Sheets há mais de uma década), então normalmente não esbarra em
+  // CORS nem em bloqueio de IP de servidor como o link anterior esbarrou.
+  var SPREADSHEET_ID = '1WIEx6NN3db-SeIyWQIZlp6kskYuCNttG5uuaWXYc9Es';
+  var SHEET_GID = '1255777483'; // aba "Extração 1"
+  var CSV_URL = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/gviz/tq?tqx=out:csv&gid=' + SHEET_GID;
+
+  // Se mesmo assim o navegador bloquear por CORS, tenta por um intermediário
+  // público como última alternativa antes de desistir.
+  var CORS_PROXIES = [
+    function (u) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u); },
+    function (u) { return 'https://corsproxy.io/?url=' + encodeURIComponent(u); }
+  ];
 
   function pad2n(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
 
@@ -1233,9 +1242,28 @@
       return Promise.reject(new Error('CSV_URL não configurada no index.html'));
     }
     var sep = CSV_URL.indexOf('?') === -1 ? '?' : '&';
-    return fetch(CSV_URL + sep + '_=' + Date.now(), { cache: 'no-store' }).then(function (resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ao ler data.csv — o robô do GitHub Actions já rodou pelo menos uma vez?');
-      return resp.text();
+    var directUrl = CSV_URL + sep + '_=' + Date.now();
+
+    function fetchText(url) {
+      return fetch(url, { cache: 'no-store' }).then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.text();
+      });
+    }
+
+    function tryProxy(i) {
+      if (i >= CORS_PROXIES.length) {
+        return Promise.reject(new Error('Não consegui buscar os dados da planilha de nenhuma forma'));
+      }
+      return fetchText(CORS_PROXIES[i](directUrl)).catch(function () {
+        return tryProxy(i + 1);
+      });
+    }
+
+    // Primeiro tenta direto (sem intermediário); só usa os intermediários
+    // se o navegador bloquear por CORS.
+    return fetchText(directUrl).catch(function () {
+      return tryProxy(0);
     }).then(function (text) {
       return buildRowsFromCsvTable(parseCsv(text));
     });
@@ -1264,6 +1292,7 @@
       if (diaMaisRecente) filters.dias.add(diaMaisRecente);
     }
     safe('buildFilters', buildFilters);
+    safe('setupTableSortClick', setupTableSortClick);
     safe('setupCicloDate', setupCicloDate);
     safe('renderCiclo', renderCiclo);
     safe('render', render);
@@ -1539,13 +1568,28 @@
       render();
     });
 
-    document.querySelectorAll('th[data-key]').forEach(function (th) {
-      th.addEventListener('click', function () {
-        var key = th.getAttribute('data-key');
-        if (SORT.key === key) { SORT.dir = SORT.dir === 'asc' ? 'desc' : 'asc'; }
-        else { SORT.key = key; SORT.dir = 'desc'; }
-        renderTable();
-      });
+    // O clique nos cabeçalhos é tratado uma única vez, fora daqui (ver
+    // setupTableSortClick mais abaixo) — não religar aqui, porque
+    // buildFilters() roda de novo a cada atualização de dados (manual e
+    // automática a cada 5 min), e religar o clique toda vez empilhava
+    // vários listeners no mesmo cabeçalho: um clique disparava o toggle
+    // crescente/decrescente várias vezes de uma vez, cancelando o efeito
+    // e dando a impressão de que só ordenava crescente.
+  }
+
+  var tableSortClickReady = false;
+  function setupTableSortClick() {
+    if (tableSortClickReady) return;
+    tableSortClickReady = true;
+    var thead = document.querySelector('.table-card thead');
+    if (!thead) return;
+    thead.addEventListener('click', function (e) {
+      var th = e.target.closest('th[data-key]');
+      if (!th) return;
+      var key = th.getAttribute('data-key');
+      if (SORT.key === key) { SORT.dir = SORT.dir === 'asc' ? 'desc' : 'asc'; }
+      else { SORT.key = key; SORT.dir = 'desc'; }
+      renderTable();
     });
   }
 
