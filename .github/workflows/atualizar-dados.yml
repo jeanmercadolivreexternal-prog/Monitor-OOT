@@ -1,0 +1,47 @@
+name: Atualizar dados do Monitor OOT
+
+# Roda sozinho a cada 10 minutos (o GitHub pode atrasar um pouco em horários
+# de pico, isso é normal e não dá pra controlar) e também pode ser disparado
+# manualmente na aba "Actions" do repositório, botão "Run workflow".
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+# Precisa de permissão de escrita pra poder commitar o data.csv atualizado
+# de volta no repositório.
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar CSV publicado da planilha
+        run: |
+          curl -sS -L --fail \
+            "https://docs.google.com/spreadsheets/d/e/2PACX-1vQc-fyDoqCGV0uqloa3Q3Gm_CkAiNb3XG-QCIsnvF13ZXm3osqPCCJ0fwkBGqvpAJHU0E62pJuf_eHI/pub?gid=1255777483&single=true&output=csv" \
+            -o data.csv.new
+
+      - name: Verificar se o arquivo veio válido
+        run: |
+          if [ ! -s data.csv.new ]; then
+            echo "Arquivo vazio — abortando pra não sobrescrever o data.csv bom com um vazio."
+            exit 1
+          fi
+          if ! head -1 data.csv.new | grep -q "DIA"; then
+            echo "Conteúdo inesperado (sem cabeçalho DIA) — abortando."
+            exit 1
+          fi
+          mv data.csv.new data.csv
+
+      - name: Commitar data.csv se mudou
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.csv
+          git diff --staged --quiet || git commit -m "Atualiza dados da planilha"
+          git push
