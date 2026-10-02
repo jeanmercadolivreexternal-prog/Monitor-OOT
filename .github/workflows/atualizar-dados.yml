@@ -23,6 +23,9 @@ jobs:
       - name: Baixar CSV publicado da planilha
         run: |
           curl -sS -L --fail \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36" \
+            -H "Accept: text/csv,application/csv,text/plain,*/*" \
+            -H "Accept-Language: pt-BR,pt;q=0.9,en;q=0.8" \
             "https://docs.google.com/spreadsheets/d/e/2PACX-1vQc-fyDoqCGV0uqloa3Q3Gm_CkAiNb3XG-QCIsnvF13ZXm3osqPCCJ0fwkBGqvpAJHU0E62pJuf_eHI/pub?gid=1255777483&single=true&output=csv" \
             -o data.csv.new
 
