@@ -1150,15 +1150,55 @@
     });
   }
 
+  // O Apps Script não manda cabeçalho de CORS, então fetch() direto de
+  // outro site é bloqueado pelo navegador mesmo a busca funcionando.
+  // Contorna isso buscando via uma tag <script> (formato "JSONP") em vez
+  // de fetch() — tags <script> carregam de qualquer origem sem passar
+  // pela checagem de CORS, então essa é a forma padrão de ler dados do
+  // Apps Script a partir de um site externo como o GitHub Pages.
+  function fetchViaJsonp(url) {
+    return new Promise(function (resolve, reject) {
+      var cbName = '__appsScriptCb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+      var script = document.createElement('script');
+      var done = false;
+      var timeoutId = setTimeout(function () {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('Tempo esgotado buscando os dados do Apps Script'));
+      }, 20000);
+
+      function cleanup() {
+        clearTimeout(timeoutId);
+        delete window[cbName];
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+
+      window[cbName] = function (data) {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve(data);
+      };
+
+      script.onerror = function () {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('Erro ao carregar os dados do Apps Script — confira se a URL em APPS_SCRIPT_URL está certa e se a implantação está ativa.'));
+      };
+
+      var sep = url.indexOf('?') === -1 ? '?' : '&';
+      script.src = url + sep + 'callback=' + cbName + '&_=' + Date.now();
+      document.head.appendChild(script);
+    });
+  }
+
   function fetchRealRows() {
     if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('COLE_AQUI') !== -1) {
       return Promise.reject(new Error('APPS_SCRIPT_URL não configurada no index.html'));
     }
-    var sep = APPS_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&';
-    return fetch(APPS_SCRIPT_URL + sep + '_=' + Date.now(), { cache: 'no-store' }).then(function (resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
-    }).then(function (data) {
+    return fetchViaJsonp(APPS_SCRIPT_URL).then(function (data) {
       return buildRowsFromAppsScriptData(data);
     });
   }
