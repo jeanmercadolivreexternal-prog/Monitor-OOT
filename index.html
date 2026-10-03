@@ -1123,149 +1123,43 @@
     }
   }
 
-  // ---------- Fonte de dados: API de visualização do Google (gviz) ----------
-  // Esse é outro link que o próprio Google disponibiliza, diferente dos
-  // dois que já tentamos (exportar e publicar na web): foi feito
-  // especificamente pra sites externos lerem dados de uma planilha pública
-  // direto pelo navegador (é a base de qualquer "gráfico incorporado" do
-  // Google Sheets há mais de uma década), então normalmente não esbarra em
-  // CORS nem em bloqueio de IP de servidor como o link anterior esbarrou.
-  var SPREADSHEET_ID = '1WIEx6NN3db-SeIyWQIZlp6kskYuCNttG5uuaWXYc9Es';
-  var SHEET_GID = '1255777483'; // aba "Extração 1"
-  var CSV_URL = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/gviz/tq?tqx=out:csv&gid=' + SHEET_GID;
+  // ---------- Fonte de dados: Apps Script como API de dados ----------
+  // A planilha não pode ficar pública de verdade (o administrador do
+  // Workspace da empresa bloqueia isso), então o site não lê mais a
+  // planilha direto. Em vez disso, busca de um pequeno Apps Script
+  // (publicado como "Qualquer pessoa" pode acessar) que lê a planilha com
+  // a autorização de quem o criou e devolve só os números em JSON — sem
+  // precisar de login nem de compartilhamento público. O site em si
+  // continua normalmente no GitHub Pages; isso só troca de onde ele busca
+  // os dados por trás.
+  //
+  // CONFIGURAÇÃO NECESSÁRIA: troque pela URL gerada em Implantar > Nova
+  // implantação (termina em "/exec") — ver instruções no topo do Code.gs.
+  var APPS_SCRIPT_URL = 'https://script.google.com/a/macros/mercadolivre.com/s/AKfycbwxyMlClVWU_ipX1vqog3vrVoQF9J3wIbB6Ra48zkRHeL9WWSJOPeflzGTjiF9HEwqr/exec';
 
-  // Se mesmo assim o navegador bloquear por CORS, tenta por um intermediário
-  // público como última alternativa antes de desistir.
-  var CORS_PROXIES = [
-    function (u) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u); },
-    function (u) { return 'https://corsproxy.io/?url=' + encodeURIComponent(u); }
-  ];
-
-  function pad2n(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
-
-  // A célula DIA vem como texto no formato de exibição (normalmente
-  // "DD/MM/AAAA") — normaliza pra "AAAA-MM-DD", que é o formato que o
-  // resto do dashboard espera.
-  function normalizeDia(v) {
-    var s = String(v || '').trim();
-    if (!s) return '';
-    var iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-    if (iso) return iso[1] + '-' + pad2n(iso[2]) + '-' + pad2n(iso[3]);
-    var br = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (br) return br[3] + '-' + pad2n(br[2]) + '-' + pad2n(br[1]);
-    return s;
-  }
-
-  function csvNum(v) {
-    var s = String(v == null ? '' : v).trim();
-    if (!s) return 0;
-    // número com vírgula decimal (ex.: "0,72") vira ponto; separador de
-    // milhar (ponto), quando junto com vírgula decimal, é removido antes.
-    if (s.indexOf(',') !== -1) s = s.replace(/\./g, '').replace(',', '.');
-    var n = Number(s);
-    return isNaN(n) ? 0 : n;
-  }
-
-  // Parser de CSV simples que entende campos entre aspas (com vírgula ou
-  // quebra de linha dentro) — o formato que o export do Google Sheets usa.
-  function parseCsv(text) {
-    var rows = [];
-    var row = [];
-    var field = '';
-    var inQuotes = false;
-    for (var i = 0; i < text.length; i++) {
-      var c = text[i];
-      if (inQuotes) {
-        if (c === '"') {
-          if (text[i + 1] === '"') { field += '"'; i++; }
-          else { inQuotes = false; }
-        } else {
-          field += c;
-        }
-      } else if (c === '"') {
-        inQuotes = true;
-      } else if (c === ',') {
-        row.push(field); field = '';
-      } else if (c === '\n') {
-        row.push(field); rows.push(row); row = []; field = '';
-      } else if (c === '\r') {
-        // ignora — o \n cuida da quebra de linha
-      } else {
-        field += c;
-      }
-    }
-    if (field !== '' || row.length) { row.push(field); rows.push(row); }
-    return rows;
-  }
-
-  // Mesma ideia do getDashboardData() do Code.gs: acha as colunas pelo
-  // cabeçalho (nome exato, sem se importar com a ordem) e monta os mesmos
-  // campos que o resto do dashboard já espera em cada linha.
-  function buildRowsFromCsvTable(table) {
-    table = (table || []).slice();
-    if (!table.length) return [];
-    var headers = table.shift();
-    var col = {};
-    headers.forEach(function (h, i) { col[String(h).trim()] = i; });
-    // Se ON_TIME_TOTAL não existir na extração, usa OOT_TOTAL no lugar —
-    // mesmo conceito (pacotes que saíram dentro do prazo), já como total
-    // exato.
-    var onTimeCol = (col.ON_TIME_TOTAL !== undefined) ? col.ON_TIME_TOTAL : col.OOT_TOTAL;
-    var rows = [];
-    table.forEach(function (r) {
-      if (col.DIA === undefined || r[col.DIA] === undefined || r[col.DIA] === '') return;
-      rows.push({
-        dia: normalizeDia(r[col.DIA]),
-        onda: String(r[col.ONDA] || ''),
-        canal: String(r[col.CANALIZACAO] || ''),
-        cpt: String(r[col.CPT] || ''),
-        totalPacotes: csvNum(r[col.TOTAL_PACOTES]),
-        cotTotal: csvNum(r[col.COT_TOTAL]),
-        dotTotal: csvNum(r[col.DOT_TOTAL]),
-        ootTotal: csvNum(r[col.OOT_TOTAL]),
-        processados: csvNum(r[col.PROCESSADOS]),
-        onTime: csvNum(r[onTimeCol]),
-        prontosExpedicao: csvNum(r[col.PRONTOS_EXPEDICAO]),
-        ofensores: csvNum(r[col.QTD_OFENSORES]),
-        naoLocProcesso: csvNum(r[col.NAO_LOC_PROCESSO]),
-        naoLocExpedicao: csvNum(r[col.NAO_LOC_EXPEDICAO]),
-        atrasoMontagem: csvNum(r[col.ATRASO_MONTAGEM]),
-        atrasoExpedicao: csvNum(r[col.ATRASO_EXPEDICAO]),
-        pendentes: csvNum(r[col.PENDENTES])
-      });
+  // Transforma { fields: [...], rows: [[...], [...]] } (o que o Apps
+  // Script devolve) nos mesmos objetos que o resto do dashboard espera —
+  // "fields" já vem na mesma ordem usada em cada linha de "rows".
+  function buildRowsFromAppsScriptData(data) {
+    var fields = (data && data.fields) || [];
+    var rawRows = (data && data.rows) || [];
+    return rawRows.map(function (r) {
+      var obj = {};
+      fields.forEach(function (f, i) { obj[f] = r[i]; });
+      return obj;
     });
-    return rows;
   }
 
   function fetchRealRows() {
-    if (!CSV_URL) {
-      return Promise.reject(new Error('CSV_URL não configurada no index.html'));
+    if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('COLE_AQUI') !== -1) {
+      return Promise.reject(new Error('APPS_SCRIPT_URL não configurada no index.html'));
     }
-    var sep = CSV_URL.indexOf('?') === -1 ? '?' : '&';
-    var directUrl = CSV_URL + sep + '_=' + Date.now();
-
-    function fetchText(url) {
-      return fetch(url, { cache: 'no-store' }).then(function (resp) {
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        return resp.text();
-      });
-    }
-
-    function tryProxy(i) {
-      if (i >= CORS_PROXIES.length) {
-        return Promise.reject(new Error('Não consegui buscar os dados da planilha de nenhuma forma'));
-      }
-      return fetchText(CORS_PROXIES[i](directUrl)).catch(function () {
-        return tryProxy(i + 1);
-      });
-    }
-
-    // Primeiro tenta direto (sem intermediário); só usa os intermediários
-    // se o navegador bloquear por CORS.
-    return fetchText(directUrl).catch(function () {
-      return tryProxy(0);
-    }).then(function (text) {
-      return buildRowsFromCsvTable(parseCsv(text));
+    var sep = APPS_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&';
+    return fetch(APPS_SCRIPT_URL + sep + '_=' + Date.now(), { cache: 'no-store' }).then(function (resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.json();
+    }).then(function (data) {
+      return buildRowsFromAppsScriptData(data);
     });
   }
 
